@@ -213,6 +213,7 @@ public class NotionClient {
             }
 
             Result result = results.getResults().get(0);
+            log.info("Notion API results: {}", result);
 
             if (result.isFailure()) {
                 log.info("Notion API workspace export returned a 'failure' state. Reason: {}", result.getError());
@@ -228,7 +229,7 @@ public class NotionClient {
                 }
             }
 
-            if (result.isSuccess()) {
+            if (result.isSuccess() && result.getStatus() != null) {
                 log.info("Notion API workspace export 'state': '{}', Pages exported so far: {}", result.getState(), result.getStatus().getPagesExported());
                 return Optional.of(result.getStatus().getExportUrl());
             }
