@@ -213,7 +213,7 @@ public class NotionClient {
             }
 
             Result result = results.getResults().get(0);
-            log.info("Notion API results: {}", result);
+            log.info("Notion API result: {} from list of: {}", result, results);
 
             if (result.isFailure()) {
                 log.info("Notion API workspace export returned a 'failure' state. Reason: {}", result.getError());
