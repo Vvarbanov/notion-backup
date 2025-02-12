@@ -3,21 +3,17 @@ package com.greydev.notionbackup;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.greydev.notionbackup.model.Result;
-import com.greydev.notionbackup.model.Results;
 import io.github.cdimascio.dotenv.Dotenv;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.CookieHandler;
-import java.net.CookieManager;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Optional;
@@ -26,8 +22,10 @@ import java.util.Optional;
 @Slf4j
 public class NotionClient {
 
-    private static final String GET_TASKS_ENDPOINT = "https://www.notion.so/api/v3/getTasks";
-    private static final String ENQUEUE_ENDPOINT = "https://www.notion.so/api/v3/enqueueTask";
+    private static final int FETCH_DOWNLOAD_URL_RETRY_SECONDS = 5;
+
+	private static final String ENQUEUE_ENDPOINT = "https://www.notion.so/api/v3/enqueueTask";
+    private static final String NOTIFICATION_ENDPOINT = "https://www.notion.so/api/v3/getNotificationLogV2";
     private static final String TOKEN_V2 = "token_v2";
     private static final String EXPORT_FILE_NAME = "notion-export";
     private static final String EXPORT_FILE_EXTENSION = ".zip";
@@ -46,18 +44,15 @@ public class NotionClient {
     private final String notionSpaceId;
     private final String notionTokenV2;
     private final String exportType;
-    private final boolean flattenExportFiletree;
+    private final boolean flattenExportFileTree;
     private final boolean exportComments;
-    private final HttpClient newClient;
-    private final CookieManager cookieManager;
+    private final HttpClient client;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private String downloadsDirectoryPath;
 
 
     NotionClient(Dotenv dotenv) {
-        this.cookieManager = new CookieManager();
-        CookieHandler.setDefault(this.cookieManager);
-        this.newClient = HttpClient.newBuilder().cookieHandler(this.cookieManager).build();
+        this.client = HttpClient.newBuilder().build();
 
         // both environment variables and variables defined in the .env file can be accessed this way
         notionSpaceId = dotenv.get(KEY_NOTION_SPACE_ID);
@@ -72,7 +67,7 @@ public class NotionClient {
         }
 
         exportType = StringUtils.isNotBlank(dotenv.get(KEY_NOTION_EXPORT_TYPE)) ? dotenv.get(KEY_NOTION_EXPORT_TYPE) : DEFAULT_NOTION_EXPORT_TYPE;
-        flattenExportFiletree = StringUtils.isNotBlank(dotenv.get(KEY_NOTION_FLATTEN_EXPORT_FILETREE)) ?
+        flattenExportFileTree = StringUtils.isNotBlank(dotenv.get(KEY_NOTION_FLATTEN_EXPORT_FILETREE)) ?
                 Boolean.parseBoolean(dotenv.get(KEY_NOTION_FLATTEN_EXPORT_FILETREE)) :
                 DEFAULT_NOTION_FLATTEN_EXPORT_FILETREE;
         exportComments = StringUtils.isNotBlank(dotenv.get(KEY_NOTION_EXPORT_COMMENTS)) ?
@@ -82,7 +77,7 @@ public class NotionClient {
         exitIfRequiredEnvVariablesNotValid();
 
         log.info("Using export type: {}", exportType);
-        log.info("Flatten export file tree: {}", flattenExportFiletree);
+        log.info("Flatten export file tree: {}", flattenExportFileTree);
         log.info("Export comments: {}", exportComments);
     }
 
@@ -99,7 +94,9 @@ public class NotionClient {
 
     public Optional<File> export() {
         try {
-            Optional<String> taskId = triggerExportTask();
+            long exportTriggerTimestamp = System.currentTimeMillis();
+			// TODO - taskId is not really needed anymore
+			Optional<String> taskId = triggerExportTask();
 
             if (taskId.isEmpty()) {
                 log.info("taskId could not be extracted");
@@ -107,7 +104,7 @@ public class NotionClient {
             }
             log.info("taskId extracted");
 
-            Optional<String> downloadLink = getDownloadLink(taskId.get());
+            Optional<String> downloadLink = fetchDownloadUrl(exportTriggerTimestamp);
             if (downloadLink.isEmpty()) {
                 log.info("downloadLink could not be extracted");
                 return Optional.empty();
@@ -118,7 +115,7 @@ public class NotionClient {
             String fileName = String.format("%s-%s%s_%s%s",
                     EXPORT_FILE_NAME,
                     exportType,
-                    flattenExportFiletree ? "-flattened" : "",
+                    flattenExportFileTree ? "-flattened" : "",
                     LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")),
                     EXPORT_FILE_EXTENSION);
 
@@ -149,7 +146,7 @@ public class NotionClient {
 
         try {
             log.info("Downloading file to: '{}'", downloadPath);
-            newClient.send(request, HttpResponse.BodyHandlers.ofFile(downloadPath));
+            client.send(request, HttpResponse.BodyHandlers.ofFile(downloadPath));
             return Optional.of(downloadPath.toFile());
         } catch (IOException | InterruptedException e) {
             log.warn("Exception during file download", e);
@@ -166,7 +163,7 @@ public class NotionClient {
                 .POST(HttpRequest.BodyPublishers.ofString(getTaskJson()))
                 .build();
 
-        HttpResponse<String> response = newClient.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
 
         JsonNode responseJsonNode = objectMapper.readTree(response.body());
 
@@ -191,54 +188,66 @@ public class NotionClient {
     }
 
 
-    private Optional<String> getDownloadLink(String taskId) throws IOException, InterruptedException {
-        String postBody = String.format("{\"taskIds\": [\"%s\"]}", taskId);
+    private Optional<String> fetchDownloadUrl(long exportTriggerTimestamp) throws IOException, InterruptedException {
+        try {
+			for (int i = 0; i < 500; i++) {
+				sleep(FETCH_DOWNLOAD_URL_RETRY_SECONDS);
 
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(GET_TASKS_ENDPOINT))
+                .uri(URI.create(NOTIFICATION_ENDPOINT))
                 .header("Cookie", TOKEN_V2 + "=" + notionTokenV2)
                 .header("Content-Type", "application/json")
-                .timeout(Duration.ofSeconds(20))
-                .POST(HttpRequest.BodyPublishers.ofString(postBody))
+                .POST(HttpRequest.BodyPublishers.ofString(getNotificationJson()))
                 .build();
 
-        for (int i = 0; i < 800; i++) {
-            HttpResponse<String> response = newClient.send(request, HttpResponse.BodyHandlers.ofString());
 
-            Results results = objectMapper.readValue(response.body(), Results.class);
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+				JsonNode rootNode = objectMapper.readTree(response.body());
 
-            if (results == null || results.getResults() == null || results.getResults().isEmpty()) {
-                sleep(6000);
+            JsonNode node = rootNode.path("recordMap");
+				node = node.path("activity");
+				node = node.fields().next().getValue();
+				node = node.path("value");
+
+            long notificationStartTimestamp = Long.parseLong(node.path("start_time").asText());
+
+				// we want the notification newer than the export trigger timestamp
+				// since the Notion response also contains older export trigger notifications
+				if (notificationStartTimestamp < exportTriggerTimestamp) {
+                log.info("The newest export trigger notification is still not in the Notion response. " +
+							"Trying again in {} seconds...", FETCH_DOWNLOAD_URL_RETRY_SECONDS);
                 continue;
-            }
+            }log.info("Found a new export trigger notification in the Notion response. " +
+						"Attempting to extract the download URL. " +
+						"Timestamp of when the export was triggered: {}. " +
+						"Timestamp of the notification: {}", exportTriggerTimestamp, notificationStartTimestamp);
 
-            Result result = results.getResults().get(0);
-            log.info("Notion API result: {} from list of: {}", result, results);
+			Result result = results.getResults().get(0);
 
-            if (result.isFailure()) {
-                log.info("Notion API workspace export returned a 'failure' state. Reason: {}", result.getError());
-                return Optional.empty();
-            }
+			if (result.isFailure()) {
+				log.info("Notion API workspace export returned a 'failure' state. Reason: {}", result.getError());
+				return Optional.empty();
+			}
 
-            if (result.getStatus() != null) {
-                log.info("Notion API workspace export 'state': '{}', Pages exported so far: {}", result.getState(), result.getStatus().getPagesExported());
+			if (result.getStatus() != null) {
+				log.info("Notion API workspace export 'state': '{}', Pages exported so far: {}", result.getState(), result.getStatus().getPagesExported());
 
-                if (StringUtils.isNotBlank(result.getStatus().getExportUrl())) {
-                    log.info("Notion response now contains the export url. 'state': '{}', Pages exported so far: {}, Status.type: {}",
-                            result.getState(), result.getStatus().getPagesExported(), result.getStatus().getType());
-                }
-            }
+				if (StringUtils.isNotBlank(result.getStatus().getExportUrl())) {
+					log.info("Notion response now contains the export url. 'state': '{}', Pages exported so far: {}, Status.type: {}",
+							result.getState(), result.getStatus().getPagesExported(), result.getStatus().getType());
+				}
+			}
 
-            if (result.isSuccess() && result.getStatus() != null) {
-                log.info("Notion API workspace export 'state': '{}', Pages exported so far: {}", result.getState(), result.getStatus().getPagesExported());
-                return Optional.of(result.getStatus().getExportUrl());
-            }
-            sleep(6000);
-        }
+			if (result.isSuccess()) {
+				log.info("Notion API workspace export 'state': '{}', Pages exported so far: {}", result.getState(), result.getStatus().getPagesExported());
+				return Optional.of(result.getStatus().getExportUrl());
+			}
+		sleep(6000);
+		}
 
-        log.info("Notion workspace export failed. After waiting 80 minutes, the export status from the Notion API response was still not 'success'");
-        return Optional.empty();
-    }
+		log.info("Notion workspace export failed. After waiting 80 minutes, the export status from the Notion API response was still not 'success'");
+		return Optional.empty();
+	}
 
     private String getTaskJson() {
         String taskJsonTemplate = "{" +
@@ -256,9 +265,18 @@ public class NotionClient {
                 "    }" +
                 "  }" +
                 "}";
-        return String.format(taskJsonTemplate, notionSpaceId, exportComments, exportType.toLowerCase(), flattenExportFiletree);
+        return String.format(taskJsonTemplate, notionSpaceId, exportComments, exportType.toLowerCase(), flattenExportFileTree);
     }
 
+	private String getNotificationJson() {
+		String notificationJsonTemplate = "{" +
+				"  \"spaceId\": \"%s\"," +
+				"  \"size\": 20," +
+				"  \"type\": \"unread_and_read\"," +
+				"  \"variant\": \"no_grouping\"" +
+				"}";
+		return String.format(notificationJsonTemplate, notionSpaceId);
+	}
 
     private void exit(String message) {
         log.error(message);
@@ -266,11 +284,12 @@ public class NotionClient {
     }
 
 
-    private void sleep(int ms) {
+    private void sleep(int seconds) {
         try {
-            Thread.sleep(ms);
+            Thread.sleep(seconds * 1000);
         } catch (InterruptedException e) {
             log.error("An exception occurred: ", e);
+			Thread.currentThread().interrupt();
         }
     }
 
