@@ -19,6 +19,7 @@ jobs:
           environment: |
             NOTION_SPACE_ID=${{ secrets.NOTION_SPACE_ID }}
             NOTION_TOKEN_V2=${{ secrets.NOTION_TOKEN_V2 }}
+            NOTION_FILE_TOKEN: ${{ secrets.NOTION_FILE_TOKEN }}
             
             GOOGLE_DRIVE_ROOT_FOLDER_ID=${{ secrets.GOOGLE_DRIVE_ROOT_FOLDER_ID }}
             GOOGLE_DRIVE_SERVICE_ACCOUNT=${{ secrets.GOOGLE_DRIVE_SERVICE_ACCOUNT }}
