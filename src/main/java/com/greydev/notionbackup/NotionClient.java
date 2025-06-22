@@ -96,7 +96,6 @@ public class NotionClient {
         }
     }
 
-
     public Optional<File> export() {
         try {
             long exportTriggerTimestamp = System.currentTimeMillis();
@@ -256,7 +255,14 @@ public class NotionClient {
                     log.info("The download URL is not yet present. Trying again in {} seconds...", FETCH_DOWNLOAD_URL_RETRY_SECONDS);
                     continue;
                 }
-                return Optional.of(exportActivity.textValue());
+
+                String textValue = exportActivity.textValue();
+                if (textValue == null || textValue.trim().equals("")) {
+                    log.info("The download URL is empty. Trying again in {} seconds...", FETCH_DOWNLOAD_URL_RETRY_SECONDS);
+                    continue;
+                }
+
+                return Optional.of(textValue);
             }
         } catch (Exception e) {
             log.error("An exception occurred: ", e);
